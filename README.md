@@ -101,11 +101,12 @@ int main() {
 > 测试在单台现代 CPU 上运行 200k 微任务、100k 短任务、20k 中任务、2k 长任务。
 
 | Scenario | Task Time | Threads=1 | Threads=2 | Threads=16 |
-| -------- | --------- | --------- | --------- | ---------- |
-| Tiny     | 10 µs     | 90k TPS   | 84k TPS   | 83k TPS    |
-| Short    | 100 µs    | 6.6k TPS  | 4.3k TPS  | 3.9k TPS   |
-| Medium   | 2 ms      | 455 TPS   | 443 TPS   | 438 TPS    |
-| Long     | 20 ms     | 49 TPS    | 49 TPS    | 49 TPS     |
+|----------|-----------|------------|-----------|------------|
+| Tiny     | 10 µs     | 95k TPS    | 190k TPS  | 1.34M TPS  |
+| Short    | 100 µs    | 9.5k TPS   | 19k TPS   | 22k TPS    |
+| Medium   | 2 ms      | 468 TPS    | 935 TPS   | 7.48k TPS  |
+| Long     | 20 ms     | 49 TPS     | 99 TPS    | 791 TPS    |
+
 
 * Tiny scenario 批量调度减少线程调度开销。
 * Medium/Long scenario CPU-bound，线程数增加效果有限。

@@ -51,7 +51,7 @@ class CCThreadPool {
 public:
 	CCThreadPool(
 	    const std::unique_ptr<ThreadCountAccessibleProvider> provider
-	    = std::move(std::make_unique<ThreadCountDefaultProvider>()));
+	    = std::make_unique<ThreadCountDefaultProvider>());
 
 	~CCThreadPool() {
 		shutdown_all();

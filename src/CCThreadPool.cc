@@ -96,23 +96,25 @@ void CCThreadPool::worker_func() {
 		 *
 		 */
 		{ // For assigned task locker
-			std::unique_lock<std::mutex> _locker(tasks_queue_locker);
-			wakeup_cond_var.wait(
-			    _locker,
-			    [this]() {
-				    return terminate_self || // indicate terminates
-				        !cached_tasks.empty(); // comes the new sessions
-			    });
-			if (cached_tasks.empty()) {
-				if (terminate_self) {
-					break;
-				} else {
-					continue; // continue the sessions
+			{
+				std::unique_lock<std::mutex> _locker(tasks_queue_locker);
+				wakeup_cond_var.wait(
+				    _locker,
+				    [this]() {
+					    return terminate_self || // indicate terminates
+					        !cached_tasks.empty(); // comes the new sessions
+				    });
+				if (cached_tasks.empty()) {
+					if (terminate_self) {
+						break;
+					} else {
+						continue; // continue the sessions
+					}
 				}
-			}
 
-			task_type = std::move(cached_tasks.front());
-			cached_tasks.pop();
+				task_type = std::move(cached_tasks.front());
+				cached_tasks.pop();
+			}
 			if (!task_type) {
 				// NULL, as we dont owns anything worth execute
 				// as this is the actual exit token
