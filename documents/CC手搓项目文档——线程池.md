@@ -342,3 +342,110 @@ void CCThreadPool::resize_thread_count(const unsigned int n) {
 }
 ```
 
+#### 提交任务
+
+​	最重要的是提交任务：
+
+```cpp
+	template <class Funtor, class... RequestArguments>
+	auto enTask(Funtor&& functor, RequestArguments&&... requestArgs)
+	    -> std::future<FutureWrapType<Funtor, RequestArguments...>> {
+
+		auto task_lambda = [functor = std::forward<Funtor>(functor),
+		                    args_tuple = std::make_tuple(std::forward<RequestArguments>(requestArgs)...)]() mutable {
+			// std::apply invokes the captured functor with arguments
+			// from the tuple.
+			// 'mutable' is necessary in case the functor's
+			// operator() is not const.
+			// MoveOnly& for the args_tuple invoke
+			return std::apply(functor, std::move(args_tuple));
+		};
+
+		using Result_t = FutureWrapType<Funtor, RequestArguments...>;
+		auto runnable_task = std::make_shared<
+		    std::packaged_task<
+		        Result_t()>>(
+		    std::move(task_lambda));
+
+		std::future<Result_t> future = runnable_task->get_future();
+
+		{
+			std::unique_lock<std::mutex> lk(tasks_queue_locker);
+			if (terminate_self)
+				throw ThreadPoolTerminateError();
+
+			// wrap as std::function<void()> by moving shared_ptr into lambda
+			cached_tasks.emplace([runnable_task]() { (*runnable_task)(); });
+		}
+
+		wakeup_cond_var.notify_one(); // wake up one to finish the sessions
+		return future;
+	}
+
+```
+
+​	这个函数实际上将任意可调用对象（functor）和若干实参打包成一个**可排队执行的任务**，把任务放进一个任务队列（`cached_tasks`），返回一个 `std::future` 给调用者，调用者可以通过这个 `future` 在任务执行完后拿到结果或异常。
+
+------
+
+#### step1: 构建任务的 lambda（捕获与 `std::apply`）
+
+```cpp
+auto task_lambda = [functor = std::forward<Funtor>(functor),
+                    args_tuple = std::make_tuple(std::forward<RequestArguments>(requestArgs)...)]() mutable {
+    return std::apply(functor, std::move(args_tuple));
+};
+```
+
+1. `[...]()`：这是带**初始化捕获**（init-capture）的 lambda（C++14 起支持），把传入的 `functor` 和参数打包进 lambda 的闭包中。
+   - `functor = std::forward<Funtor>(functor)`：把外层参数完美转发并在闭包里以值的方式持有（如果传入的是右值则移动进来）。
+   - `args_tuple = std::make_tuple(std::forward<RequestArguments>(requestArgs)...)`：把所有参数通过 `std::make_tuple` 打包。`make_tuple` 会把参数 **decay/复制/移动** 成 tuple 中的元素类型（即 `std::decay` 行为：去引用、去 cv、将数组/函数折叠为指针等）。
+     - 这意味着：如果传入的是一个右值可移动对象，则 `make_tuple` 会把它移动到 tuple；如果传入左值，则会拷贝左值。
+     - 与 `std::forward_as_tuple` 不同：`forward_as_tuple` 会保存引用（可能造成后续悬空），而 `make_tuple` 存储的是**owning** 值，这通常是线程/队列场景的正确选择。
+2. `mutable`：允许 lambda 在调用时修改捕获的成员（例如 `functor`、`args_tuple`），必要时可移动 `args_tuple`（见下一行）。
+3. `std::apply(functor, std::move(args_tuple))`：
+   - `std::apply`（C++17）把 tuple 展开并以元素作为参数来调用 `functor`（相当于 `functor(tuple_element0, tuple_element1, ...)`）。
+   - 这里使用 `std::move(args_tuple)`，把 tuple 整体移动到 `std::apply` 中——对于 move-only 类型（如 `std::unique_ptr`）支持良好：它们会在任务执行时被移动进实际调用中。
+   - 因为 `args_tuple` 是 lambda 的成员，这里移动意味着该 lambda 很可能**只能被调用一次**（因为它把所有参数都移动走了）。在任务场景下，这正是期望的（每个任务只运行一次）。
+
+------
+
+#### step2: 包装成 `std::packaged_task` 和 `std::future`
+
+```cpp
+using Result_t = FutureWrapType<Funtor, RequestArguments...>;
+auto runnable_task = std::make_shared<std::packaged_task<Result_t()>>(std::move(task_lambda));
+std::future<Result_t> future = runnable_task->get_future();
+```
+
+- `std::packaged_task<Result_t()>`：把 `task_lambda`（一个可调用对象，签名为 `Result_t()`）封装为一个 **可调用的任务对象**，其内部维护一个 `std::promise`，当任务被调用时会把返回值设置到这个 promise，从而能让获得的 `std::future` 接收结果或异常。
+- `std::make_shared<...>`：将 `packaged_task` 放到 `shared_ptr` 中。之所以用 `shared_ptr`，是因为后面在将任务加入队列时，队列里存放的是 `std::function<void()>`（或类似），这个 `std::function` 需要一个可复制的、可延长生命周期的函数对象来调用 `packaged_task`。`std::shared_ptr` 保证即使原函数栈返回，被封装的 `packaged_task` 依然存活直到队列中的 lambda 被调用完成。
+- `runnable_task->get_future()`：得到与 `packaged_task` 关联的 `std::future`，并返回给调用者，让其等待或获取结果。
+
+注意：`std::packaged_task` 的 `get_future()` 必须在 `packaged_task` 还存在且只调用一次（规范要求）。这里先得到 `future` 是正确的顺序。
+
+------
+
+#### step3: 推入任务队列（线程安全）并唤醒 worker
+
+```cpp
+{
+    std::unique_lock<std::mutex> lk(tasks_queue_locker);
+    if (terminate_self)
+        throw ThreadPoolTerminateError();
+
+    cached_tasks.emplace([runnable_task]() { (*runnable_task)(); });
+}
+
+wakeup_cond_var.notify_one();
+return future;
+```
+
+- `std::unique_lock<std::mutex> lk(tasks_queue_locker);`：用互斥锁保护对 `cached_tasks` 的访问（线程安全）。
+- `if (terminate_self) throw ThreadPoolTerminateError();`：如果线程池正在终止，不接受新任务，抛出异常。
+- `cached_tasks.emplace([runnable_task]() { (*runnable_task)(); });`：
+  - 把一个 `std::function<void()>`（或可调用类型）放入任务队列，这个 lambda 捕获了 `shared_ptr` `runnable_task`（按值捕获），并在 worker 执行时调用 `(*runnable_task)()`，从而触发 `packaged_task` 把结果/异常传递给 `future`。
+  - 使用 `shared_ptr` 的好处：队列里仅存放一个小的复制（`shared_ptr` 增加引用计数），避免移动或析构问题。
+- `wakeup_cond_var.notify_one();`：唤醒至少一个等待的 worker 线程，让其取出并执行刚放入的任务。
+- `return future;`：将 `future` 返回给调用者。
+
