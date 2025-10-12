@@ -91,39 +91,38 @@ void CCThreadPool::emplace_exit_functor() {
 void CCThreadPool::worker_func() {
 	CCThreadPoolTask_t task_type;
 	while (1) {
-		/**
-		 * @brief First step, we need to
-		 *
-		 */
-		{ // For assigned task locker
-			{
-				std::unique_lock<std::mutex> _locker(tasks_queue_locker);
-				wakeup_cond_var.wait(
-				    _locker,
-				    [this]() {
-					    return terminate_self || // indicate terminates
-					        !cached_tasks.empty(); // comes the new sessions
-				    });
-				if (cached_tasks.empty()) {
-					if (terminate_self) {
-						break;
-					} else {
-						continue; // continue the sessions
-					}
+		// lock the code to see if
+		// 1. there are tasks availables
+		// 2. wakeup_cond_var will wake up the thread if tasks availables
+		// 3. then we should see if these is due to terminate_self
+		// 4. 	if terminate_self == true, then all thread pool should shut down
+		{
+			std::unique_lock<std::mutex> _locker(tasks_queue_locker);
+			wakeup_cond_var.wait(
+			    _locker,
+			    [this]() {
+				    return terminate_self || // indicate terminates
+				        !cached_tasks.empty(); // comes the new sessions
+			    });
+			if (cached_tasks.empty()) {
+				if (terminate_self) {
+					break;
+				} else {
+					continue; // continue the sessions
 				}
-
-				task_type = std::move(cached_tasks.front());
-				cached_tasks.pop();
 			}
-			if (!task_type) {
-				// NULL, as we dont owns anything worth execute
-				// as this is the actual exit token
-				// we should never execute this
-				break;
-			}
-			// invoke the task
-			task_type(); // invoke the task
+			// get the task
+			task_type = std::move(cached_tasks.front());
+			cached_tasks.pop();
 		}
+		if (is_exit_functor(task_type)) {
+			// NULL, as we dont owns anything worth execute
+			// as this is the actual exit token
+			// we should never execute this
+			break;
+		}
+		// invoke the task
+		task_type(); // invoke the task
 	}
 }
 

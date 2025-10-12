@@ -26,19 +26,20 @@ namespace CCThreadPool {
 /**
  * @brief   ThreadCountAccessibleProvider provide how many thread
  *          should we get for the configures count;
+ *			To override the behaviors of Provider, rewrite the provide*
+ *			API to adjust, see ThreadCountDefaultProvider as an example
  *
  */
 struct ThreadCountAccessibleProvider {
-	virtual unsigned int provideThreadInitCount() const noexcept = 0;
-	virtual unsigned int provideThreadMaxCount() const noexcept = 0;
-	virtual unsigned int provideThreadMinCount() const noexcept = 0;
-	virtual ~ThreadCountAccessibleProvider() = default;
-
-private:
-	friend class CCThreadPool;
 	unsigned int getThreadInitCount() const; ///< interative interfaces
 	unsigned int getThreadMaxCount() const; ///< interative interfaces
 	unsigned int getThreadMinCount() const; ///< interative interfaces
+	virtual ~ThreadCountAccessibleProvider() = default;
+
+private:
+	virtual unsigned int provideThreadInitCount() const noexcept = 0;
+	virtual unsigned int provideThreadMaxCount() const noexcept = 0;
+	virtual unsigned int provideThreadMinCount() const noexcept = 0;
 }; // ThreadCountAccessibleProvider
 
 struct ThreadCountDefaultProvider : ThreadCountAccessibleProvider {
@@ -53,7 +54,7 @@ public:
 	    const std::unique_ptr<ThreadCountAccessibleProvider> provider
 	    = std::make_unique<ThreadCountDefaultProvider>());
 
-	~CCThreadPool() {
+	virtual ~CCThreadPool() {
 		shutdown_all();
 	}
 	template <class Funtor, class... RequestArguments>
